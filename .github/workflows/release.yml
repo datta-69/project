@@ -30,7 +30,7 @@ jobs:
       matrix:
         include:
           - name: linux-x86_64
-            os: ubuntu-latest
+            os: ubuntu-22.04
           - name: windows-x86_64
             os: windows-latest
           - name: macos-x86_64
@@ -48,8 +48,21 @@ jobs:
       - name: Rust build cache
         uses: Swatinem/rust-cache@v2
 
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            pkg-config \
+            libssl-dev \
+            libudev-dev \
+            clang \
+            cmake
+
       - name: Build (release)
-        run: cargo build --release
+        run: cargo build --release --locked
 
       - name: Package artifact (Windows)
         if: runner.os == 'Windows'
