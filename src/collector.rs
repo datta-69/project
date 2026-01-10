@@ -1,6 +1,9 @@
 use crate::models::{ProcessMetadata, ProcessMetrics};
 use sysinfo::{CpuRefreshKind, Disks, MemoryRefreshKind, ProcessRefreshKind, RefreshKind, System};
 
+#[cfg(target_os = "linux")]
+use std::{fs, path::Path, process::Command};
+
 #[cfg(windows)]
 use serde::Deserialize;
 
@@ -19,6 +22,11 @@ pub struct SystemCollector {
 
     #[cfg(windows)]
     wmi_con: Option<WMIConnection>,
+
+    #[cfg(target_os = "linux")]
+    linux_ram_speed_attempted: bool,
+    #[cfg(target_os = "linux")]
+    cached_ram_speed_mhz: Option<u64>,
 }
 
 impl Default for SystemCollector {
@@ -49,6 +57,11 @@ impl SystemCollector {
 
             #[cfg(windows)]
             wmi_con: None,
+
+            #[cfg(target_os = "linux")]
+            linux_ram_speed_attempted: false,
+            #[cfg(target_os = "linux")]
+            cached_ram_speed_mhz: None,
         }
     }
 
@@ -173,6 +186,15 @@ impl SystemCollector {
             }
         }
 
+        #[cfg(target_os = "linux")]
+        {
+            // Prefer Linux cpufreq if available: this is usually the most “Task Manager-like”
+            // live frequency signal on bare-metal Linux.
+            if let Some(mhz) = read_linux_cpufreq_mhz() {
+                return Some(mhz);
+            }
+        }
+
         // Cross-platform fallback: average per-CPU sysinfo frequency.
         let freqs: Vec<u64> = self
             .sys
@@ -190,13 +212,56 @@ impl SystemCollector {
         Some(sum / freqs.len() as u64)
     }
 
+    #[cfg(target_os = "linux")]
+    fn read_linux_cpufreq_mhz() -> Option<u64> {
+        // Reads e.g. /sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq (kHz)
+        // and averages across CPUs.
+        let base = Path::new("/sys/devices/system/cpu");
+        let mut values_khz: Vec<u64> = Vec::new();
+
+        let entries = fs::read_dir(base).ok()?;
+        for e in entries.flatten() {
+            let name = e.file_name();
+            let name = name.to_string_lossy();
+            if !name.starts_with("cpu") {
+                continue;
+            }
+            // cpu0, cpu1...
+            if name[3..].chars().any(|c| !c.is_ascii_digit()) {
+                continue;
+            }
+
+            let path = e.path().join("cpufreq").join("scaling_cur_freq");
+            let Ok(s) = fs::read_to_string(&path) else {
+                continue;
+            };
+            let Ok(khz) = s.trim().parse::<u64>() else {
+                continue;
+            };
+            if khz > 0 {
+                values_khz.push(khz);
+            }
+        }
+
+        if values_khz.is_empty() {
+            return None;
+        }
+
+        let sum: u64 = values_khz.iter().sum();
+        let avg_khz = sum / values_khz.len() as u64;
+        Some((avg_khz + 500) / 1000) // kHz -> MHz (rounded)
+    }
+
     pub fn get_memory_stats(&self) -> (u64, u64) {
         (self.sys.used_memory(), self.sys.total_memory())
     }
 
-    /// Best-effort RAM speed in MHz (Windows only).
+    /// Best-effort RAM speed in MHz.
     ///
-    /// Uses Win32_PhysicalMemory.Speed/ConfiguredClockSpeed and returns the maximum module speed.
+    /// - Windows: Uses `Win32_PhysicalMemory.Speed/ConfiguredClockSpeed` and returns the maximum
+    ///   module speed.
+    /// - Linux: Best-effort via `dmidecode` (DMI/SMBIOS). This often requires root privileges and
+    ///   may be unavailable in some VMs.
     pub fn get_ram_speed_mhz(&mut self) -> Option<u64> {
         #[cfg(windows)]
         {
@@ -226,10 +291,74 @@ impl SystemCollector {
             best
         }
 
-        #[cfg(not(windows))]
+        #[cfg(target_os = "linux")]
+        {
+            if self.linux_ram_speed_attempted {
+                return self.cached_ram_speed_mhz;
+            }
+
+            let v = Self::read_linux_ram_speed_mhz_dmidecode();
+            self.linux_ram_speed_attempted = true;
+            self.cached_ram_speed_mhz = v;
+            v
+        }
+
+        #[cfg(all(not(windows), not(target_os = "linux")))]
         {
             None
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn read_linux_ram_speed_mhz_dmidecode() -> Option<u64> {
+        // dmidecode output examples (varies by platform/BIOS):
+        //   "Speed: 3200 MT/s"
+        //   "Configured Memory Speed: 2666 MT/s"
+        // Some machines/VMs show "Unknown" or omit the field.
+        let output = Command::new("dmidecode")
+            .args(["--type", "memory"])
+            .output()
+            .ok()?;
+
+        if !output.status.success() {
+            return None;
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let mut best: Option<u64> = None;
+
+        for line in stdout.lines().map(str::trim) {
+            if !(line.starts_with("Speed:") || line.starts_with("Configured Memory Speed:")) {
+                continue;
+            }
+
+            // Extract the first integer found on the line.
+            let mut num: Option<u64> = None;
+            let mut acc: u64 = 0;
+            let mut in_digits = false;
+            for ch in line.chars() {
+                if ch.is_ascii_digit() {
+                    in_digits = true;
+                    acc = acc
+                        .saturating_mul(10)
+                        .saturating_add((ch as u8 - b'0') as u64);
+                } else if in_digits {
+                    num = Some(acc);
+                    break;
+                }
+            }
+            if num.is_none() && in_digits {
+                num = Some(acc);
+            }
+
+            let Some(v) = num.filter(|v| *v > 0) else {
+                continue;
+            };
+
+            best = Some(best.map(|b| b.max(v)).unwrap_or(v));
+        }
+
+        best
     }
 
     pub fn get_disk_space_summary(&self) -> String {
