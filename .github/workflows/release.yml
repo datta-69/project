@@ -59,6 +59,10 @@ jobs:
             libssl-dev \
             libudev-dev \
             libx11-dev \
+            libxcb1-dev \
+            libxcb-render0-dev \
+            libxcb-shape0-dev \
+            libxcb-xfixes0-dev \
             libxi-dev \
             libxrandr-dev \
             libxkbcommon-dev \
