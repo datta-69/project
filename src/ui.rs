@@ -103,8 +103,9 @@ fn draw_dashboard(f: &mut Frame, app: &App, area: Rect) {
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(7),      // header
-            Constraint::Percentage(40), // disks
-            Constraint::Percentage(30), // gpu
+            Constraint::Percentage(30), // disks
+            Constraint::Percentage(20), // gpu
+            Constraint::Length(8),      // startup diagnostics
             Constraint::Min(3),         // totals
         ])
         .split(chunks[0]);
@@ -215,6 +216,19 @@ fn draw_dashboard(f: &mut Frame, app: &App, area: Rect) {
         List::new(gpu_items).block(Block::default().borders(Borders::ALL).title(gpu_title));
     f.render_widget(gpu_list, overview_chunks[2]);
 
+    let diagnostics_items: Vec<ListItem> = app
+        .startup_diagnostics
+        .iter()
+        .take(6)
+        .map(|line| ListItem::new(line.clone()).style(Style::default().fg(Color::Gray)))
+        .collect();
+    let diagnostics_list = List::new(diagnostics_items).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title("Startup Diagnostics"),
+    );
+    f.render_widget(diagnostics_list, overview_chunks[3]);
+
     let mem_gb_used = used_mem as f64 / 1_048_576.0;
     let mem_gb_total = total_mem as f64 / 1_048_576.0;
     let footer_text = vec![
@@ -237,7 +251,7 @@ fn draw_dashboard(f: &mut Frame, app: &App, area: Rect) {
     let footer = Paragraph::new(footer_text)
         .block(Block::default().borders(Borders::ALL).title("Totals"))
         .style(Style::default().fg(Color::White));
-    f.render_widget(footer, overview_chunks[3]);
+    f.render_widget(footer, overview_chunks[4]);
 
     // Pane 2: Top Risk + Top GPU + Top VRAM
     let middle_chunks = Layout::default()

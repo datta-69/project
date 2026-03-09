@@ -57,6 +57,7 @@ pub struct App {
     pub os_info: String,
     pub host_name: String,
     pub disk_usage_text: String,
+    pub startup_diagnostics: Vec<String>,
     pub known_pids: HashSet<u32>,
     pub process_table_state: TableState,
     pub selected_pid: Option<u32>,
@@ -86,6 +87,14 @@ impl App {
         let last_gpu_mem_refresh = Utc::now();
         let cpu_freq_mhz = collector.get_avg_cpu_frequency_mhz();
         let ram_speed_mhz = collector.get_ram_speed_mhz();
+        let startup_diagnostics = build_startup_diagnostics(
+            &gpu_adapters,
+            &gpu_stats,
+            &gpu_process_usage,
+            &gpu_process_memory,
+            cpu_freq_mhz,
+            ram_speed_mhz,
+        );
         let last_hw_stats_refresh = Utc::now();
         let mut process_table_state = TableState::default();
         process_table_state.select(Some(0));
@@ -165,6 +174,7 @@ impl App {
             os_info,
             host_name,
             disk_usage_text,
+            startup_diagnostics,
             known_pids: HashSet::new(),
             process_table_state,
             selected_pid: None,
@@ -678,6 +688,74 @@ impl App {
             _ => {}
         }
     }
+}
+
+fn build_startup_diagnostics(
+    gpu_adapters: &[GpuAdapterInfo],
+    gpu_stats: &Option<GpuStats>,
+    gpu_process_usage: &HashMap<u32, f64>,
+    gpu_process_memory: &HashMap<u32, GpuProcessMemory>,
+    cpu_freq_mhz: Option<u64>,
+    ram_speed_mhz: Option<u64>,
+) -> Vec<String> {
+    let mut lines = Vec::with_capacity(8);
+
+    lines.push("Core metrics provider: sysinfo (active)".to_string());
+
+    #[cfg(windows)]
+    lines.push("CPU/RAM extra provider: WMI (best-effort)".to_string());
+    #[cfg(target_os = "linux")]
+    lines.push("CPU/RAM extra provider: cpufreq + dmidecode (best-effort)".to_string());
+    #[cfg(target_os = "macos")]
+    lines.push("CPU/RAM extra provider: sysinfo + system_profiler (best-effort)".to_string());
+
+    #[cfg(windows)]
+    lines.push("Disk throughput provider: PhysicalDisk WMI or process delta fallback".to_string());
+    #[cfg(not(windows))]
+    lines.push("Disk throughput provider: process delta fallback".to_string());
+
+    lines.push(if gpu_adapters.is_empty() {
+        "GPU adapter provider: wgpu (no adapters detected)".to_string()
+    } else {
+        "GPU adapter provider: wgpu (active)".to_string()
+    });
+
+    lines.push(if gpu_stats.is_some() {
+        "GPU global metrics provider: platform API (active)".to_string()
+    } else {
+        "GPU global metrics provider: unavailable on this host".to_string()
+    });
+
+    lines.push(if gpu_process_usage.is_empty() {
+        "GPU process usage provider: unavailable".to_string()
+    } else {
+        "GPU process usage provider: active".to_string()
+    });
+
+    lines.push(if gpu_process_memory.is_empty() {
+        "GPU process memory provider: unavailable".to_string()
+    } else {
+        "GPU process memory provider: active".to_string()
+    });
+
+    lines.push(if cpu_freq_mhz.is_some() {
+        "CPU frequency metric: active".to_string()
+    } else {
+        "CPU frequency metric: unavailable".to_string()
+    });
+
+    lines.push(if ram_speed_mhz.is_some() {
+        "RAM speed metric: active".to_string()
+    } else {
+        "RAM speed metric: unavailable".to_string()
+    });
+
+    #[cfg(feature = "nvidia-nvml")]
+    lines.push("NVIDIA NVML feature: enabled".to_string());
+    #[cfg(not(feature = "nvidia-nvml"))]
+    lines.push("NVIDIA NVML feature: disabled".to_string());
+
+    lines
 }
 
 #[inline]

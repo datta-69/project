@@ -12,6 +12,7 @@ use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
+use directories::ProjectDirs;
 use ratatui::{backend::CrosstermBackend, Terminal};
 use std::fs::OpenOptions;
 use std::path::PathBuf;
@@ -35,13 +36,8 @@ impl Drop for TerminalGuard {
     }
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-fn home_dir() -> Option<PathBuf> {
-    std::env::var_os("HOME").map(PathBuf::from)
-}
-
 fn log_file_candidates() -> Vec<PathBuf> {
-    let mut out = Vec::with_capacity(4);
+    let mut out = Vec::with_capacity(5);
 
     if let Ok(exe) = std::env::current_exe() {
         if let Some(parent) = exe.parent() {
@@ -49,46 +45,14 @@ fn log_file_candidates() -> Vec<PathBuf> {
         }
     }
 
-    #[cfg(windows)]
-    {
-        if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") {
-            out.push(
-                PathBuf::from(local_app_data)
-                    .join("process_monitor")
-                    .join("process_monitor.log"),
-            );
-        }
-    }
-
-    #[cfg(target_os = "linux")]
-    {
-        if let Some(xdg_state_home) = std::env::var_os("XDG_STATE_HOME") {
-            out.push(
-                PathBuf::from(xdg_state_home)
-                    .join("process_monitor")
-                    .join("process_monitor.log"),
-            );
-        }
-        if let Some(home) = home_dir() {
-            out.push(
-                home.join(".local")
-                    .join("state")
-                    .join("process_monitor")
-                    .join("process_monitor.log"),
-            );
-        }
-    }
-
-    #[cfg(target_os = "macos")]
-    {
-        if let Some(home) = home_dir() {
-            out.push(
-                home.join("Library")
-                    .join("Logs")
-                    .join("process_monitor")
-                    .join("process_monitor.log"),
-            );
-        }
+    if let Some(project_dirs) = ProjectDirs::from("com", "ProcessMonitor", "process_monitor") {
+        out.push(
+            project_dirs
+                .data_local_dir()
+                .join("logs")
+                .join("process_monitor.log"),
+        );
+        out.push(project_dirs.cache_dir().join("process_monitor.log"));
     }
 
     out.push(PathBuf::from("process_monitor.log"));
