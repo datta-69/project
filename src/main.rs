@@ -14,32 +14,127 @@ use crossterm::{
 };
 use ratatui::{backend::CrosstermBackend, Terminal};
 use std::fs::OpenOptions;
+use std::path::PathBuf;
 use std::{io, time::Duration};
+
+#[derive(Default)]
+struct TerminalGuard {
+    raw_enabled: bool,
+    alt_screen_enabled: bool,
+}
+
+impl Drop for TerminalGuard {
+    fn drop(&mut self) {
+        if self.alt_screen_enabled {
+            let mut stdout = io::stdout();
+            let _ = execute!(stdout, LeaveAlternateScreen, DisableMouseCapture);
+        }
+        if self.raw_enabled {
+            let _ = disable_raw_mode();
+        }
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn home_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME").map(PathBuf::from)
+}
+
+fn log_file_candidates() -> Vec<PathBuf> {
+    let mut out = Vec::with_capacity(4);
+
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(parent) = exe.parent() {
+            out.push(parent.join("process_monitor.log"));
+        }
+    }
+
+    #[cfg(windows)]
+    {
+        if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") {
+            out.push(
+                PathBuf::from(local_app_data)
+                    .join("process_monitor")
+                    .join("process_monitor.log"),
+            );
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        if let Some(xdg_state_home) = std::env::var_os("XDG_STATE_HOME") {
+            out.push(
+                PathBuf::from(xdg_state_home)
+                    .join("process_monitor")
+                    .join("process_monitor.log"),
+            );
+        }
+        if let Some(home) = home_dir() {
+            out.push(
+                home.join(".local")
+                    .join("state")
+                    .join("process_monitor")
+                    .join("process_monitor.log"),
+            );
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        if let Some(home) = home_dir() {
+            out.push(
+                home.join("Library")
+                    .join("Logs")
+                    .join("process_monitor")
+                    .join("process_monitor.log"),
+            );
+        }
+    }
+
+    out.push(PathBuf::from("process_monitor.log"));
+    out
+}
+
+fn open_log_file() -> io::Result<(std::fs::File, PathBuf)> {
+    let mut last_err: Option<io::Error> = None;
+
+    for path in log_file_candidates() {
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+
+        match OpenOptions::new().create(true).append(true).open(&path) {
+            Ok(file) => return Ok((file, path)),
+            Err(e) => last_err = Some(e),
+        }
+    }
+
+    Err(last_err.unwrap_or_else(|| io::Error::other("No writable log path found")))
+}
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Logging must not write to stdout/stderr while TUI is active (it corrupts the screen).
-    // Write logs to a file next to the executable.
-    let log_path = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|d| d.join("process_monitor.log")))
-        .unwrap_or_else(|| "process_monitor.log".into());
-
-    let log_file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&log_path)
-        .map_err(|e| format!("Failed to open log file {:?}: {}", log_path, e))?;
+    // Write logs to the first writable path from a platform-aware list.
+    let (log_file, log_path) =
+        open_log_file().map_err(|e| format!("Failed to open any log file path: {}", e))?;
 
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
         .target(env_logger::Target::Pipe(Box::new(log_file)))
         .format_timestamp_secs()
         .init();
 
-    // Setup Terminal
+    eprintln!("Logging to: {}", log_path.display());
+
+    // Setup Terminal (guarded so partial setup failures still restore terminal state)
+    let mut guard = TerminalGuard::default();
     enable_raw_mode().map_err(|e| format!("Failed to enable raw mode: {}", e))?;
+    guard.raw_enabled = true;
+
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)
         .map_err(|e| format!("Failed to setup terminal: {}", e))?;
+    guard.alt_screen_enabled = true;
+
     let backend = CrosstermBackend::new(stdout);
     let mut terminal =
         Terminal::new(backend).map_err(|e| format!("Failed to create terminal: {}", e))?;
@@ -50,20 +145,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Main Loop
     let res = run_app(&mut terminal, &mut app);
 
-    // Restore Terminal
-    disable_raw_mode()?;
-    execute!(
-        terminal.backend_mut(),
-        LeaveAlternateScreen,
-        DisableMouseCapture
-    )?;
+    // Restore cursor immediately; raw/alt cleanup is handled by guard Drop.
     terminal.show_cursor()?;
 
     if let Err(err) = res {
         eprintln!("Application error: {:?}", err);
-        eprintln!("Check process_monitor.log for more details.");
+        eprintln!("Check log for details: {}", log_path.display());
         return Err(err.into());
     }
+
+    drop(terminal);
+    drop(guard);
 
     Ok(())
 }

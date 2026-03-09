@@ -1,5 +1,6 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::collections::VecDeque;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum RiskLevel {
@@ -67,7 +68,7 @@ pub struct ProcessRisk {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MonitoredProcess {
     pub metadata: ProcessMetadata,
-    pub metrics_history: Vec<(DateTime<Utc>, ProcessMetrics)>,
+    pub metrics_history: VecDeque<(DateTime<Utc>, ProcessMetrics)>,
     pub current_risk: ProcessRisk,
     pub lineage_path: Vec<u32>, // Path from root to this process
 }

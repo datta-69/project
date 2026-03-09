@@ -8,7 +8,7 @@ use chrono::Utc;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::widgets::TableState;
 use std::cmp::Reverse;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::Instant;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -26,15 +26,15 @@ pub struct App {
     pub collector: SystemCollector,
     pub analyzer: BehaviorAnalyzer,
     pub processes: Vec<MonitoredProcess>,
-    pub events: Vec<SystemEvent>,
-    pub cpu_history: Vec<(f64, f64)>, // (time_index, value)
-    pub ram_history: Vec<(f64, f64)>,
-    pub gpu_history: Vec<(f64, f64)>,
-    pub gpu_vram_history: Vec<(f64, f64)>,
-    pub cpu_freq_history: Vec<(f64, f64)>,
-    pub ram_speed_history: Vec<(f64, f64)>,
-    pub disk_read_mibs_history: Vec<(f64, f64)>,
-    pub disk_write_mibs_history: Vec<(f64, f64)>,
+    pub events: VecDeque<SystemEvent>,
+    pub cpu_history: VecDeque<(f64, f64)>, // (time_index, value)
+    pub ram_history: VecDeque<(f64, f64)>,
+    pub gpu_history: VecDeque<(f64, f64)>,
+    pub gpu_vram_history: VecDeque<(f64, f64)>,
+    pub cpu_freq_history: VecDeque<(f64, f64)>,
+    pub ram_speed_history: VecDeque<(f64, f64)>,
+    pub disk_read_mibs_history: VecDeque<(f64, f64)>,
+    pub disk_write_mibs_history: VecDeque<(f64, f64)>,
     pub disk_io_by_disk: HashMap<String, (f64, f64)>,
     pub disk_io_is_best_effort: bool,
     pub uptime: u64,
@@ -109,23 +109,23 @@ impl App {
             .unwrap_or(0.0)
             .max(0.0);
 
-        let mut cpu_history = Vec::with_capacity(101);
-        let mut ram_history = Vec::with_capacity(101);
-        let mut gpu_history = Vec::with_capacity(101);
-        let mut gpu_vram_history = Vec::with_capacity(101);
-        let mut cpu_freq_history = Vec::with_capacity(101);
-        let mut ram_speed_history = Vec::with_capacity(101);
-        let mut disk_read_mibs_history = Vec::with_capacity(101);
-        let mut disk_write_mibs_history = Vec::with_capacity(101);
+        let mut cpu_history = VecDeque::with_capacity(101);
+        let mut ram_history = VecDeque::with_capacity(101);
+        let mut gpu_history = VecDeque::with_capacity(101);
+        let mut gpu_vram_history = VecDeque::with_capacity(101);
+        let mut cpu_freq_history = VecDeque::with_capacity(101);
+        let mut ram_speed_history = VecDeque::with_capacity(101);
+        let mut disk_read_mibs_history = VecDeque::with_capacity(101);
+        let mut disk_write_mibs_history = VecDeque::with_capacity(101);
         for i in 0..10 {
-            cpu_history.push((i as f64, cpu_now));
-            ram_history.push((i as f64, mem_percent));
-            gpu_history.push((i as f64, gpu_now));
-            gpu_vram_history.push((i as f64, gpu_vram_now));
-            cpu_freq_history.push((i as f64, cpu_freq_mhz.unwrap_or(0) as f64));
-            ram_speed_history.push((i as f64, ram_speed_mhz.unwrap_or(0) as f64));
-            disk_read_mibs_history.push((i as f64, 0.0));
-            disk_write_mibs_history.push((i as f64, 0.0));
+            cpu_history.push_back((i as f64, cpu_now));
+            ram_history.push_back((i as f64, mem_percent));
+            gpu_history.push_back((i as f64, gpu_now));
+            gpu_vram_history.push_back((i as f64, gpu_vram_now));
+            cpu_freq_history.push_back((i as f64, cpu_freq_mhz.unwrap_or(0) as f64));
+            ram_speed_history.push_back((i as f64, ram_speed_mhz.unwrap_or(0) as f64));
+            disk_read_mibs_history.push_back((i as f64, 0.0));
+            disk_write_mibs_history.push_back((i as f64, 0.0));
         }
 
         Self {
@@ -134,7 +134,7 @@ impl App {
             collector,
             analyzer: BehaviorAnalyzer::new(),
             processes: Vec::new(),
-            events: Vec::new(),
+            events: VecDeque::new(),
             cpu_history,
             ram_history,
             gpu_history,
@@ -189,6 +189,11 @@ impl App {
     }
 
     pub fn next_process(&mut self) {
+        if self.processes.is_empty() {
+            self.process_table_state.select(None);
+            self.selected_pid = None;
+            return;
+        }
         let i = match self.process_table_state.selected() {
             Some(i) => {
                 if i >= self.processes.len() - 1 {
@@ -204,6 +209,11 @@ impl App {
     }
 
     pub fn previous_process(&mut self) {
+        if self.processes.is_empty() {
+            self.process_table_state.select(None);
+            self.selected_pid = None;
+            return;
+        }
         let i = match self.process_table_state.selected() {
             Some(i) => {
                 if i == 0 {
@@ -309,16 +319,12 @@ impl App {
             }
         };
 
-        if self.disk_read_mibs_history.len() >= 100 {
-            self.disk_read_mibs_history.remove(0);
-        }
-        if self.disk_write_mibs_history.len() >= 100 {
-            self.disk_write_mibs_history.remove(0);
-        }
-        self.disk_read_mibs_history
-            .push((self.tick_count, read_mibs));
-        self.disk_write_mibs_history
-            .push((self.tick_count, write_mibs));
+        push_history_capped(&mut self.disk_read_mibs_history, (self.tick_count, read_mibs), 100);
+        push_history_capped(
+            &mut self.disk_write_mibs_history,
+            (self.tick_count, write_mibs),
+            100,
+        );
 
         // Refresh GPU adapter list occasionally (adapter enumeration can be expensive on some systems).
         if (Utc::now() - self.last_gpu_refresh).num_seconds() >= 10 {
@@ -377,11 +383,11 @@ impl App {
                         severity: RiskLevel::Low,
                     };
                     EventLogger::log_event(&event);
-                    self.events.push(event);
+                    self.events.push_back(event);
 
                     // Keep events list manageable (max 100 events)
                     if self.events.len() > 100 {
-                        self.events.remove(0);
+                        self.events.pop_front();
                     }
                 }
             }
@@ -419,7 +425,7 @@ impl App {
                     (
                         MonitoredProcess {
                             metadata,
-                            metrics_history: Vec::new(),
+                            metrics_history: VecDeque::new(),
                             current_risk: risk,
                             lineage_path: vec![],
                         },
@@ -429,11 +435,12 @@ impl App {
             };
 
             // Append history and cap to keep memory bounded.
-            proc.metrics_history.push((now, metrics));
+            proc.metrics_history.push_back((now, metrics));
             const MAX_METRICS_HISTORY: usize = 60;
             if proc.metrics_history.len() > MAX_METRICS_HISTORY {
-                let drain_count = proc.metrics_history.len() - MAX_METRICS_HISTORY;
-                proc.metrics_history.drain(0..drain_count);
+                while proc.metrics_history.len() > MAX_METRICS_HISTORY {
+                    proc.metrics_history.pop_front();
+                }
             }
 
             // Optionally log events.
@@ -465,9 +472,9 @@ impl App {
                         severity: proc.current_risk.level.clone(),
                     };
                     EventLogger::log_event(&event);
-                    self.events.push(event);
+                    self.events.push_back(event);
                     if self.events.len() > 100 {
-                        self.events.remove(0);
+                        self.events.pop_front();
                     }
                 }
             }
@@ -484,12 +491,12 @@ impl App {
                 self.processes.sort_by(|a, b| {
                     let av = a
                         .metrics_history
-                        .last()
+                        .back()
                         .map(|x| x.1.cpu_usage)
                         .unwrap_or(0.0);
                     let bv = b
                         .metrics_history
-                        .last()
+                        .back()
                         .map(|x| x.1.cpu_usage)
                         .unwrap_or(0.0);
 
@@ -505,7 +512,7 @@ impl App {
                     self.processes.sort_by_key(|p| {
                         let mem = p
                             .metrics_history
-                            .last()
+                            .back()
                             .map(|x| x.1.memory_usage)
                             .unwrap_or(0);
                         (Reverse(mem), p.metadata.pid)
@@ -514,7 +521,7 @@ impl App {
                     self.processes.sort_by_key(|p| {
                         let mem = p
                             .metrics_history
-                            .last()
+                            .back()
                             .map(|x| x.1.memory_usage)
                             .unwrap_or(0);
                         (mem, p.metadata.pid)
@@ -572,10 +579,7 @@ impl App {
         // Update Chart Data with EXACT Global CPU Usage
         let global_cpu = self.collector.get_global_cpu_usage();
 
-        if self.cpu_history.len() >= 100 {
-            self.cpu_history.remove(0);
-        }
-        self.cpu_history.push((self.tick_count, global_cpu as f64));
+        push_history_capped(&mut self.cpu_history, (self.tick_count, global_cpu as f64), 100);
 
         // Convert to f64 for calculations
         let (used_mem, total_mem) = self.collector.get_memory_stats();
@@ -585,24 +589,15 @@ impl App {
             0.0
         };
 
-        if self.ram_history.len() >= 100 {
-            self.ram_history.remove(0);
-        }
-        self.ram_history.push((self.tick_count, mem_percent));
+        push_history_capped(&mut self.ram_history, (self.tick_count, mem_percent), 100);
 
         // CPU frequency history (MHz)
         let cpu_mhz = self.cpu_freq_mhz.unwrap_or(0) as f64;
-        if self.cpu_freq_history.len() >= 100 {
-            self.cpu_freq_history.remove(0);
-        }
-        self.cpu_freq_history.push((self.tick_count, cpu_mhz));
+        push_history_capped(&mut self.cpu_freq_history, (self.tick_count, cpu_mhz), 100);
 
         // RAM speed history (MHz) - mostly constant
         let ram_mhz = self.ram_speed_mhz.unwrap_or(0) as f64;
-        if self.ram_speed_history.len() >= 100 {
-            self.ram_speed_history.remove(0);
-        }
-        self.ram_speed_history.push((self.tick_count, ram_mhz));
+        push_history_capped(&mut self.ram_speed_history, (self.tick_count, ram_mhz), 100);
 
         // GPU history (best-effort). Keep it aligned with tick_count.
         let gpu_percent = self
@@ -611,10 +606,7 @@ impl App {
             .and_then(|s| s.utilization_percent)
             .unwrap_or(0.0)
             .clamp(0.0, 100.0);
-        if self.gpu_history.len() >= 100 {
-            self.gpu_history.remove(0);
-        }
-        self.gpu_history.push((self.tick_count, gpu_percent));
+        push_history_capped(&mut self.gpu_history, (self.tick_count, gpu_percent), 100);
 
         // GPU VRAM usage history (MiB) - best effort.
         let gpu_vram_used = self
@@ -623,10 +615,7 @@ impl App {
             .and_then(|s| s.dedicated_used_mib)
             .unwrap_or(0.0)
             .max(0.0);
-        if self.gpu_vram_history.len() >= 100 {
-            self.gpu_vram_history.remove(0);
-        }
-        self.gpu_vram_history.push((self.tick_count, gpu_vram_used));
+        push_history_capped(&mut self.gpu_vram_history, (self.tick_count, gpu_vram_used), 100);
     }
 
     pub fn on_key(&mut self, key: KeyEvent) {
@@ -677,4 +666,12 @@ impl App {
             _ => {}
         }
     }
+}
+
+#[inline]
+fn push_history_capped(buf: &mut VecDeque<(f64, f64)>, point: (f64, f64), cap: usize) {
+    if buf.len() >= cap {
+        buf.pop_front();
+    }
+    buf.push_back(point);
 }

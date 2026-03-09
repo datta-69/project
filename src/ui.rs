@@ -10,6 +10,7 @@ use ratatui::{
     },
     Frame,
 };
+use std::collections::VecDeque;
 
 pub fn ui(f: &mut Frame, app: &mut App) {
     let size = f.area();
@@ -267,7 +268,7 @@ fn draw_dashboard(f: &mut Frame, app: &App, area: Rect) {
                 RiskLevel::Medium => Color::Yellow,
                 RiskLevel::Low => Color::Green,
             };
-            let last_metrics = p.metrics_history.last().map(|x| &x.1);
+            let last_metrics = p.metrics_history.back().map(|x| &x.1);
             let cpu = last_metrics.map(|m| m.cpu_usage).unwrap_or(0.0);
             let mem_mib = last_metrics.map(|m| m.memory_mib()).unwrap_or(0.0);
             ListItem::new(format!(
@@ -520,7 +521,7 @@ fn draw_process_list(f: &mut Frame, app: &mut App, area: Rect) {
                 _ => Style::default().fg(Color::White), // White is better for reading normal processes
             };
 
-            let last_metrics = p.metrics_history.last().map(|x| &x.1);
+            let last_metrics = p.metrics_history.back().map(|x| &x.1);
             let cpu = last_metrics.map(|m| m.cpu_usage).unwrap_or(0.0);
             let mem_mib = last_metrics.map(|m| m.memory_mib() as u64).unwrap_or(0);
             let status = last_metrics.map(|m| m.status.as_str()).unwrap_or("-");
@@ -603,7 +604,7 @@ fn draw_process_list(f: &mut Frame, app: &mut App, area: Rect) {
     let total_mem_kib = app.collector.get_memory_stats().1.max(1);
     let selected = app.selected_process();
     if let Some(p) = selected {
-        let m = p.metrics_history.last().map(|x| &x.1);
+        let m = p.metrics_history.back().map(|x| &x.1);
         let cpu = m.map(|mm| mm.cpu_usage).unwrap_or(0.0).clamp(0.0, 100.0);
         let gpu_opt = app.gpu_process_usage.get(&p.metadata.pid).copied();
 
@@ -734,13 +735,14 @@ fn draw_graphs(f: &mut Frame, app: &App, area: Rect) {
     let cpu_last = last_history_value(&app.cpu_history)
         .unwrap_or(0.0)
         .clamp(0.0, 100.0);
+    let cpu_points = deque_points(&app.cpu_history);
     let cpu_dataset = vec![Dataset::default()
         .name("CPU Usage (%)")
         .marker(ratatui::symbols::Marker::Braille)
         .style(Style::default().fg(Color::Cyan))
         .graph_type(GraphType::Line)
-        .data(&app.cpu_history)];
-    let (cpu_x_min, cpu_x_max) = x_bounds_for_history(&app.cpu_history);
+        .data(&cpu_points)];
+    let (cpu_x_min, cpu_x_max) = x_bounds_for_history(&cpu_points);
     let chart_cpu = Chart::new(cpu_dataset)
         .block(
             Block::default()
@@ -753,14 +755,15 @@ fn draw_graphs(f: &mut Frame, app: &App, area: Rect) {
 
     // CPU speed
     let cpu_f_last = last_history_value(&app.cpu_freq_history).unwrap_or(0.0);
+    let cpu_freq_points = deque_points(&app.cpu_freq_history);
     let cpu_f_dataset = vec![Dataset::default()
         .name("CPU MHz")
         .marker(ratatui::symbols::Marker::Braille)
         .style(Style::default().fg(Color::Cyan))
         .graph_type(GraphType::Line)
-        .data(&app.cpu_freq_history)];
-    let (cpu_f_x_min, cpu_f_x_max) = x_bounds_for_history(&app.cpu_freq_history);
-    let (cpu_f_y_min, cpu_f_y_max) = y_bounds_for_history(&app.cpu_freq_history, 0.10);
+        .data(&cpu_freq_points)];
+    let (cpu_f_x_min, cpu_f_x_max) = x_bounds_for_history(&cpu_freq_points);
+    let (cpu_f_y_min, cpu_f_y_max) = y_bounds_for_history(&cpu_freq_points, 0.10);
     let chart_cpu_f = Chart::new(cpu_f_dataset)
         .block(
             Block::default()
@@ -783,13 +786,14 @@ fn draw_graphs(f: &mut Frame, app: &App, area: Rect) {
     let ram_last = last_history_value(&app.ram_history)
         .unwrap_or(0.0)
         .clamp(0.0, 100.0);
+    let ram_points = deque_points(&app.ram_history);
     let ram_dataset = vec![Dataset::default()
         .name("RAM Usage (%)")
         .marker(ratatui::symbols::Marker::Braille)
         .style(Style::default().fg(Color::LightGreen))
         .graph_type(GraphType::Line)
-        .data(&app.ram_history)];
-    let (ram_x_min, ram_x_max) = x_bounds_for_history(&app.ram_history);
+        .data(&ram_points)];
+    let (ram_x_min, ram_x_max) = x_bounds_for_history(&ram_points);
     let chart_ram = Chart::new(ram_dataset)
         .block(
             Block::default()
@@ -804,13 +808,14 @@ fn draw_graphs(f: &mut Frame, app: &App, area: Rect) {
     let gpu_last = last_history_value(&app.gpu_history)
         .unwrap_or(0.0)
         .clamp(0.0, 100.0);
+    let gpu_points = deque_points(&app.gpu_history);
     let gpu_dataset = vec![Dataset::default()
         .name("GPU Speed (%)")
         .marker(ratatui::symbols::Marker::Braille)
         .style(Style::default().fg(Color::Magenta))
         .graph_type(GraphType::Line)
-        .data(&app.gpu_history)];
-    let (gpu_x_min, gpu_x_max) = x_bounds_for_history(&app.gpu_history);
+        .data(&gpu_points)];
+    let (gpu_x_min, gpu_x_max) = x_bounds_for_history(&gpu_points);
     let chart_gpu = Chart::new(gpu_dataset)
         .block(
             Block::default()
@@ -831,14 +836,15 @@ fn draw_graphs(f: &mut Frame, app: &App, area: Rect) {
         .and_then(|s| s.dedicated_total_mib)
         .unwrap_or(0.0)
         .max(0.0);
+    let vram_points = deque_points(&app.gpu_vram_history);
     let vram_dataset = vec![Dataset::default()
         .name("VRAM Used (MiB)")
         .marker(ratatui::symbols::Marker::Braille)
         .style(Style::default().fg(Color::Magenta))
         .graph_type(GraphType::Line)
-        .data(&app.gpu_vram_history)];
-    let (vram_x_min, vram_x_max) = x_bounds_for_history(&app.gpu_vram_history);
-    let (vram_y_min, vram_y_max) = y_bounds_for_history(&app.gpu_vram_history, 0.10);
+        .data(&vram_points)];
+    let (vram_x_min, vram_x_max) = x_bounds_for_history(&vram_points);
+    let (vram_y_min, vram_y_max) = y_bounds_for_history(&vram_points, 0.10);
     let vram_title = if vram_total > 0.0 {
         format!("GPU VRAM (MiB)  {:.0}/{:.0} MiB", vram_last, vram_total)
     } else {
@@ -865,26 +871,24 @@ fn draw_graphs(f: &mut Frame, app: &App, area: Rect) {
     let io_w_last = last_history_value(&app.disk_write_mibs_history)
         .unwrap_or(0.0)
         .max(0.0);
+    let io_read_points = deque_points(&app.disk_read_mibs_history);
+    let io_write_points = deque_points(&app.disk_write_mibs_history);
     let io_datasets = vec![
         Dataset::default()
             .name("Read MiB/s")
             .marker(ratatui::symbols::Marker::Braille)
             .style(Style::default().fg(Color::Blue))
             .graph_type(GraphType::Line)
-            .data(&app.disk_read_mibs_history),
+            .data(&io_read_points),
         Dataset::default()
             .name("Write MiB/s")
             .marker(ratatui::symbols::Marker::Braille)
             .style(Style::default().fg(Color::Red))
             .graph_type(GraphType::Line)
-            .data(&app.disk_write_mibs_history),
+            .data(&io_write_points),
     ];
-    let (io_x_min, io_x_max) = x_bounds_for_history(&app.disk_read_mibs_history);
-    let (io_y_min, io_y_max) = y_bounds_for_two_histories(
-        &app.disk_read_mibs_history,
-        &app.disk_write_mibs_history,
-        0.15,
-    );
+    let (io_x_min, io_x_max) = x_bounds_for_history(&io_read_points);
+    let (io_y_min, io_y_max) = y_bounds_for_two_histories(&io_read_points, &io_write_points, 0.15);
     let disk_col = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Percentage(70), Constraint::Percentage(30)])
@@ -942,8 +946,12 @@ fn draw_graphs(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(disk_list, disk_col[1]);
 }
 
-fn last_history_value(data: &[(f64, f64)]) -> Option<f64> {
-    data.last().map(|p| p.1)
+fn last_history_value(data: &VecDeque<(f64, f64)>) -> Option<f64> {
+    data.back().map(|p| p.1)
+}
+
+fn deque_points(data: &VecDeque<(f64, f64)>) -> Vec<(f64, f64)> {
+    data.iter().copied().collect()
 }
 
 fn draw_logs(f: &mut Frame, app: &App, area: Rect) {
@@ -1095,7 +1103,13 @@ fn y_bounds_for_two_histories(a: &[(f64, f64)], b: &[(f64, f64)], pad_ratio: f64
     y_bounds_for_history(&merged, pad_ratio)
 }
 
-fn draw_mini_chart(f: &mut Frame, data: &[(f64, f64)], area: Rect, title: &str, color: Color) {
+fn draw_mini_chart(
+    f: &mut Frame,
+    data: &VecDeque<(f64, f64)>,
+    area: Rect,
+    title: &str,
+    color: Color,
+) {
     if data.is_empty() {
         let msg = Paragraph::new("Waiting for data...")
             .block(Block::default().borders(Borders::ALL).title(title))
@@ -1104,13 +1118,14 @@ fn draw_mini_chart(f: &mut Frame, data: &[(f64, f64)], area: Rect, title: &str, 
         return;
     }
 
+    let points = deque_points(data);
     let datasets = vec![Dataset::default()
         .name("Usage")
         .marker(ratatui::symbols::Marker::Dot)
         .style(Style::default().fg(color))
-        .data(data)];
+        .data(&points)];
 
-    let (x_min, x_max) = x_bounds_for_history(data);
+    let (x_min, x_max) = x_bounds_for_history(&points);
     let chart = Chart::new(datasets)
         .block(Block::default().borders(Borders::ALL).title(title))
         .x_axis(Axis::default().bounds([x_min, x_max]))

@@ -4,10 +4,13 @@ use crate::models::{ProcessMetadata, ProcessMetrics, ProcessRisk, RiskLevel};
 const CPU_WEIGHT: f32 = 40.0;
 const MEM_WEIGHT: f32 = 30.0;
 const SUSPICIOUS_WEIGHT: f32 = 20.0;
+const SHELL_SUSPICIOUS_WEIGHT: f32 = 8.0;
 const CPU_HIGH_THRESHOLD: f32 = 80.0;
 const CPU_MEDIUM_THRESHOLD: f32 = 20.0;
 const MEM_HIGH_THRESHOLD_MIB: f32 = 1000.0;
 const MEM_BASELINE_MIB: f32 = 1024.0; // 1 GiB
+const SHELL_ACTIVITY_CPU_THRESHOLD: f32 = 20.0;
+const SHELL_ACTIVITY_MEM_THRESHOLD_MIB: f32 = 200.0;
 
 #[derive(Debug, Default)]
 pub struct BehaviorAnalyzer {
@@ -60,13 +63,37 @@ impl BehaviorAnalyzer {
             "mimikatz",
         ];
 
+        static SHELL_NAMES: &[&str] = &["powershell.exe", "cmd.exe", "pwsh", "bash", "zsh"];
+
+        let shell_encoded_flags = ["-enc", "-encodedcommand", "-nop", "-w hidden", "--command"];
+
         let name_lower = metadata.name.to_lowercase();
-        if SUSPICIOUS_NAMES
+        let command_line = metadata.command.join(" ").to_lowercase();
+        let shells_enabled = std::env::var("PM_ENABLE_SHELL_RISK")
+            .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
+            .unwrap_or(false);
+
+        let is_shell = SHELL_NAMES.iter().any(|&name| name_lower.contains(name));
+        let shell_activity = metrics.cpu_usage >= SHELL_ACTIVITY_CPU_THRESHOLD
+            || mem_usage_mib >= SHELL_ACTIVITY_MEM_THRESHOLD_MIB
+            || shell_encoded_flags
+                .iter()
+                .any(|flag| command_line.contains(flag));
+
+        let is_suspicious_name = SUSPICIOUS_NAMES
             .iter()
-            .any(|&suspicious| name_lower.contains(suspicious))
-        {
-            raw_score += SUSPICIOUS_WEIGHT;
-            factors.push(format!("Suspicious Name: {}", metadata.name));
+            .any(|&suspicious| name_lower.contains(suspicious));
+
+        if is_suspicious_name {
+            if is_shell {
+                if shells_enabled && shell_activity {
+                    raw_score += SHELL_SUSPICIOUS_WEIGHT;
+                    factors.push(format!("Shell Activity: {}", metadata.name));
+                }
+            } else {
+                raw_score += SUSPICIOUS_WEIGHT;
+                factors.push(format!("Suspicious Name: {}", metadata.name));
+            }
         }
 
         // 4. Normalize score

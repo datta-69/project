@@ -4,6 +4,9 @@ use sysinfo::{CpuRefreshKind, Disks, MemoryRefreshKind, ProcessRefreshKind, Refr
 #[cfg(target_os = "linux")]
 use std::{fs, path::Path, process::Command};
 
+#[cfg(target_os = "macos")]
+use std::process::Command;
+
 #[cfg(windows)]
 use serde::Deserialize;
 
@@ -27,6 +30,11 @@ pub struct SystemCollector {
     linux_ram_speed_attempted: bool,
     #[cfg(target_os = "linux")]
     cached_ram_speed_mhz: Option<u64>,
+
+    #[cfg(target_os = "macos")]
+    macos_ram_speed_attempted: bool,
+    #[cfg(target_os = "macos")]
+    cached_macos_ram_speed_mhz: Option<u64>,
 }
 
 impl Default for SystemCollector {
@@ -62,6 +70,11 @@ impl SystemCollector {
             linux_ram_speed_attempted: false,
             #[cfg(target_os = "linux")]
             cached_ram_speed_mhz: None,
+
+            #[cfg(target_os = "macos")]
+            macos_ram_speed_attempted: false,
+            #[cfg(target_os = "macos")]
+            cached_macos_ram_speed_mhz: None,
         }
     }
 
@@ -262,6 +275,7 @@ impl SystemCollector {
     ///   module speed.
     /// - Linux: Best-effort via `dmidecode` (DMI/SMBIOS). This often requires root privileges and
     ///   may be unavailable in some VMs.
+    /// - macOS: Best-effort via `system_profiler SPMemoryDataType`.
     pub fn get_ram_speed_mhz(&mut self) -> Option<u64> {
         #[cfg(windows)]
         {
@@ -303,7 +317,19 @@ impl SystemCollector {
             v
         }
 
-        #[cfg(all(not(windows), not(target_os = "linux")))]
+        #[cfg(target_os = "macos")]
+        {
+            if self.macos_ram_speed_attempted {
+                return self.cached_macos_ram_speed_mhz;
+            }
+
+            let v = Self::read_macos_ram_speed_mhz_system_profiler();
+            self.macos_ram_speed_attempted = true;
+            self.cached_macos_ram_speed_mhz = v;
+            v
+        }
+
+        #[cfg(all(not(windows), not(target_os = "linux"), not(target_os = "macos")))]
         {
             None
         }
@@ -333,6 +359,56 @@ impl SystemCollector {
             }
 
             // Extract the first integer found on the line.
+            let mut num: Option<u64> = None;
+            let mut acc: u64 = 0;
+            let mut in_digits = false;
+            for ch in line.chars() {
+                if ch.is_ascii_digit() {
+                    in_digits = true;
+                    acc = acc
+                        .saturating_mul(10)
+                        .saturating_add((ch as u8 - b'0') as u64);
+                } else if in_digits {
+                    num = Some(acc);
+                    break;
+                }
+            }
+            if num.is_none() && in_digits {
+                num = Some(acc);
+            }
+
+            let Some(v) = num.filter(|v| *v > 0) else {
+                continue;
+            };
+
+            best = Some(best.map(|b| b.max(v)).unwrap_or(v));
+        }
+
+        best
+    }
+
+    #[cfg(target_os = "macos")]
+    fn read_macos_ram_speed_mhz_system_profiler() -> Option<u64> {
+        // Example lines:
+        //   "      Speed: 3200 MHz"
+        //   "      Speed: 4266 MT/s"
+        let output = Command::new("system_profiler")
+            .args(["SPMemoryDataType"])
+            .output()
+            .ok()?;
+
+        if !output.status.success() {
+            return None;
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let mut best: Option<u64> = None;
+
+        for line in stdout.lines().map(str::trim) {
+            if !line.starts_with("Speed:") {
+                continue;
+            }
+
             let mut num: Option<u64> = None;
             let mut acc: u64 = 0;
             let mut in_digits = false;
